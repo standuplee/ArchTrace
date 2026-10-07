@@ -1,0 +1,72 @@
+name: archtrace
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    environment:
+      POSTGRES_USER: archtrace
+      POSTGRES_DB: catalog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-archtrace-local-password}
+    volumes:
+      - catalog-db:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U archtrace -d catalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  minio:
+    image: archtrace-minio:RELEASE.2025-04-22T22-12-26Z
+    build: ./infra/minio
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-archtrace}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-archtrace-local-password}
+    ports:
+      - '127.0.0.1:19000:9000'
+      - '127.0.0.1:19001:9001'
+    volumes:
+      - object-data:/data
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:9000/minio/health/live]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  rest:
+    image: tabulario/iceberg-rest:1.6.0
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-archtrace}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-archtrace-local-password}
+      AWS_REGION: us-east-1
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres:5432/catalog
+      CATALOG_JDBC_USER: archtrace
+      CATALOG_JDBC_PASSWORD: ${POSTGRES_PASSWORD:-archtrace-local-password}
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: 'true'
+    ports:
+      - '127.0.0.1:18181:8181'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+  trino:
+    image: trinodb/trino:470
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-archtrace}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-archtrace-local-password}
+    ports:
+      - '127.0.0.1:18080:8080'
+    volumes:
+      - ./infra/trino/catalog:/etc/trino/catalog:ro
+    depends_on:
+      - rest
+    healthcheck:
+      test: [CMD, /usr/lib/trino/bin/health-check]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+volumes:
+  catalog-db:
+  object-data:
